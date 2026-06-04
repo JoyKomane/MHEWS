@@ -1,0 +1,31 @@
+# ============================================================
+#  MHEWS — .gitignore
+#  Files and folders that should NEVER go into Git.
+# ============================================================
+
+# Environment variables — contains API keys and passwords
+.env
+
+# Python cache files — auto-generated, not needed in git
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Virtual environment — too large, recreated with pip install
+venv/
+.venv/
+env/
+
+# macOS system files
+.DS_Store
+
+# Editor folders
+.vscode/
+.idea/
+
+# Node (leftover from the old Express backend)
+node_modules/
+
+# Docker volumes (if ever exported locally)
+db_data/

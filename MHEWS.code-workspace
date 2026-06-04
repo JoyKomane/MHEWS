@@ -1,0 +1,10 @@
+{
+  "folders": [
+    { "path": "Backend" },
+    { "path": "db" },
+    { "path": "Frontend" },
+    { "path": "GIS" },
+    { "path": "root level" }
+  ],
+  "settings": {}
+}

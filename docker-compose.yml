@@ -1,0 +1,125 @@
+# ============================================================
+#  MHEWS — docker-compose.yml
+#  B2: Defines the two containers that run your whole system.
+#
+#  What is Docker Compose?
+#  Think of it as a recipe that tells Docker:
+#  "Start these services, connect them to each other,
+#   and give them the right settings."
+#
+#  You only need ONE command to start everything:
+#    docker compose up --build
+#  And ONE command to stop everything:
+#    docker compose down
+# ============================================================
+
+version: '3.9'
+
+services:
+
+  # ----------------------------------------------------------
+  # SERVICE 1: The database (PostGIS)
+  # ----------------------------------------------------------
+  # PostGIS = PostgreSQL + spatial extensions.
+  # This gives us a real database that understands geometry,
+  # polygons, and spatial queries like "is this point inside
+  # this polygon?" — which is the heart of MHEWS.
+  # ----------------------------------------------------------
+  db:
+    # This is the official Docker image for PostGIS.
+    # 15-3.4 means: PostgreSQL version 15, PostGIS version 3.4
+    image: postgis/postgis:15-3.4
+
+    # Environment variables = settings passed into the container.
+    # These create the database, username, and password.
+    # In production you would move these to a .env file,
+    # but for development this is fine.
+    environment:
+      POSTGRES_DB: mhews          # Name of our database
+      POSTGRES_USER: postgres     # Database username
+      POSTGRES_PASSWORD: postgres # Database password (change in production!)
+
+    # Volumes do two things here:
+    # 1. db_data: Persists your data even after container restarts.
+    #    Without this, every time you restart Docker you lose all data.
+    # 2. init.sql: When the container starts for the first time,
+    #    it automatically runs this SQL file to create tables
+    #    and seed mock data. The :ro means read-only (safe).
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+    # Exposes port 5432 on your laptop so you can connect
+    # with a tool like TablePlus or DBeaver to inspect the data.
+    # Format is "your_laptop_port:container_port"
+    ports:
+      - "5432:5432"
+
+    # Health check: Docker will ping the database every 5 seconds
+    # to make sure it is actually ready before the app tries to connect.
+    # Without this, the app container sometimes starts before the
+    # database is ready and crashes immediately.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d mhews"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ----------------------------------------------------------
+  # SERVICE 2: The application (FastAPI + Python)
+  # ----------------------------------------------------------
+  # This runs your Python backend — the FastAPI server
+  # that the frontend will talk to.
+  # ----------------------------------------------------------
+  app:
+    # Instead of using a pre-built image, Docker will build
+    # one from your Dockerfile (which we will create in B4).
+    build: .
+
+    # Expose port 8000 so your browser can reach the API at:
+    # http://localhost:8000
+    ports:
+      - "8000:8000"
+
+    # Environment variables passed into the Python app.
+    # DATABASE_URL tells asyncpg exactly how to connect to PostGIS.
+    # Format: postgres://user:password@host:port/database
+    # Note: the host is "db" — that is the service name above,
+    # Docker automatically resolves it to the right container IP.
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@db:5432/mhews
+      PORT: 8000
+      # Add your Anthropic API key here when you reach B9
+      # ANTHROPIC_API_KEY: your_key_here
+
+    # This tells Docker: do not start the app container
+    # until the db container passes its health check.
+    # This prevents the "database not ready" crash on startup.
+    depends_on:
+      db:
+        condition: service_healthy
+
+    # This mounts your local mhews/ folder into the container.
+    # This means any change you make to your Python code is
+    # instantly reflected inside the container — no rebuild needed.
+    # Great for development.
+    volumes:
+      - .:/usr/src/app
+
+    # The command that starts your FastAPI server.
+    # uvicorn = the web server that runs FastAPI
+    # backend.main:app = look in backend/main.py for the app object
+    # --host 0.0.0.0 = accept connections from outside the container
+    # --port 8000 = listen on port 8000
+    # --reload = restart automatically when you change a .py file
+    command: uvicorn backend.main:app --host 0.0.0.0 --port 8000
+
+# ----------------------------------------------------------
+# Named volumes
+# ----------------------------------------------------------
+# This declares the db_data volume used above.
+# Docker manages this volume — your data lives here even
+# after you stop and restart containers.
+# ----------------------------------------------------------
+volumes:
+  db_data:
