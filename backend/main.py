@@ -231,6 +231,10 @@ async def root():
 from backend.alerts import router as alerts_router
 app.include_router(alerts_router)
 
+# B9 — translation endpoint
+from backend.translate import router as translate_router
+app.include_router(translate_router)
+
 # ============================================================
 #  NOTE: More endpoints added in the next steps:
 #  B7 — CAP XML parser in gis/cap_parser.py
