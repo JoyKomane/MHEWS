@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>MHEWS — Early Warning System</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
+  <style>
+    :root {
+      --bg:       #f5f7fa;
+      --white:    #ffffff;
+      --border:   #e8ecf0;
+      --text:     #111827;
+      --muted:    #6b7280;
+      --accent:   #2563eb;
+      --extreme:  #dc2626;
+      --severe:   #ea580c;
+      --moderate: #d97706;
+      --minor:    #2563eb;
+      --safe:     #16a34a;
+      --radius:   12px;
+      --shadow:   0 1px 4px rgba(0,0,0,0.08);
+    }
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    html,body{height:100%;font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--text)}
+    body{display:flex;flex-direction:column;height:100vh;overflow:hidden}
+
+    /* ── TOPBAR ── */
+    .topbar{height:56px;background:var(--white);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;padding:0 1.5rem;flex-shrink:0;z-index:100}
+    .brand{display:flex;align-items:center;gap:10px}
+    .brand-icon{width:34px;height:34px;background:var(--accent);border-radius:8px;display:flex;align-items:center;justify-content:center;color:#fff;font-size:16px}
+    .brand-name{font-weight:800;font-size:1.05rem;color:var(--text)}
+    .brand-sub{font-size:.72rem;color:var(--muted);font-weight:400}
+    .topbar-right{display:flex;align-items:center;gap:1rem}
+    .live-pill{display:flex;align-items:center;gap:5px;background:#fef3c7;color:#92400e;border-radius:999px;padding:3px 10px;font-size:.72rem;font-weight:700}
+    .live-dot{width:6px;height:6px;background:#f59e0b;border-radius:50%;animation:blink 1.4s ease infinite}
+    @keyframes blink{0%,100%{opacity:1}50%{opacity:.2}}
+    #live-clock{font-size:.78rem;color:var(--muted);font-variant-numeric:tabular-nums}
+
+    /* ── MAIN LAYOUT ── */
+    .layout{flex:1;display:grid;grid-template-columns:1fr 400px;overflow:hidden}
+
+    /* ── MAP ── */
+    .map-wrap{position:relative}
+    #map{width:100%;height:100%}
+    .map-footer{position:absolute;bottom:1rem;left:50%;transform:translateX(-50%);background:rgba(255,255,255,0.92);backdrop-filter:blur(6px);border:1px solid var(--border);border-radius:999px;padding:.3rem 1rem;font-size:.75rem;color:var(--muted);white-space:nowrap;z-index:50}
+
+    /* ── PANEL ── */
+    .panel{background:var(--white);border-left:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden;position:relative}
+    .panel-inner{flex:1;overflow-y:auto;padding:1.25rem;display:flex;flex-direction:column;gap:1rem}
+    .panel-inner::-webkit-scrollbar{width:4px}
+    .panel-inner::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+
+    /* loading */
+    .loading-cover{position:absolute;inset:0;background:var(--white);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.75rem;z-index:10;transition:opacity .3s}
+    .loading-cover.gone{opacity:0;pointer-events:none}
+    .spinner{width:36px;height:36px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .loading-cover p{font-size:.85rem;color:var(--muted)}
+
+    /* queue nav */
+    .queue-row{display:flex;align-items:center;justify-content:space-between}
+    .section-title{font-size:.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+    .nav-btns{display:flex;align-items:center;gap:6px}
+    .nav-btn{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:3px 10px;font-size:.78rem;cursor:pointer;color:var(--text);transition:background .15s}
+    .nav-btn:hover{background:var(--border)}
+    .nav-count{font-size:.78rem;color:var(--muted);min-width:32px;text-align:center}
+
+    /* alert card */
+    .alert-card{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:1rem;display:flex;flex-direction:column;gap:.6rem}
+    .alert-card-top{display:flex;align-items:flex-start;gap:10px}
+    .hazard-icon{width:38px;height:38px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0}
+    .alert-info{flex:1}
+    #alert-title{font-size:.98rem;font-weight:700;line-height:1.3;color:var(--text)}
+    .meta-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:4px}
+    .badge{padding:2px 9px;border-radius:999px;font-size:.67rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
+    .sev-extreme{background:#fee2e2;color:#b91c1c}
+    .sev-severe {background:#ffedd5;color:#c2410c}
+    .sev-moderate{background:#fef3c7;color:#b45309}
+    .sev-minor  {background:#dbeafe;color:#1d4ed8}
+    .sev-unknown{background:var(--border);color:var(--muted)}
+    .badge-plain{background:var(--border);color:var(--muted)}
+    #alert-time{font-size:.72rem;color:var(--muted);margin-top:2px}
+
+    /* expiry */
+    .expiry-row{display:flex;align-items:center;justify-content:space-between;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:7px 12px}
+    .expiry-label{font-size:.72rem;color:#92400e;font-weight:500}
+    #expiry-val{font-size:.8rem;font-weight:700;color:#b45309;font-variant-numeric:tabular-nums}
+
+    /* descriptions */
+    .block-label{font-size:.68rem;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:4px}
+    .plain-box{background:#eff6ff;border:1px solid #bfdbfe;border-radius:var(--radius);padding:.875rem 1rem}
+    .plain-box p{font-size:.88rem;color:var(--text);line-height:1.65}
+    .toggle-cap{background:none;border:none;color:var(--accent);font-size:.75rem;cursor:pointer;padding:0;margin-top:4px;text-decoration:underline}
+    .cap-raw{background:var(--bg);border-left:3px solid var(--border);border-radius:0 6px 6px 0;padding:8px 12px;font-size:.8rem;color:var(--muted);line-height:1.6;display:none}
+    .cap-raw.visible{display:block}
+
+    /* language */
+    .lang-row{display:flex;align-items:center;gap:8px}
+    .lang-row label{font-size:.72rem;color:var(--muted);white-space:nowrap;font-weight:500}
+    #lang-select{flex:1;background:var(--white);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.82rem;padding:6px 10px;font-family:inherit;cursor:pointer}
+    .translate-btn{background:var(--accent);border:none;border-radius:8px;color:#fff;font-size:.78rem;font-weight:600;padding:7px 14px;cursor:pointer;white-space:nowrap;transition:opacity .15s}
+    .translate-btn:disabled{opacity:.5;cursor:not-allowed}
+
+    /* GPS */
+    .gps-section{display:flex;flex-direction:column;gap:8px}
+    .gps-btns{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+    .gps-btn{border:none;border-radius:8px;padding:9px 12px;font-size:.8rem;font-weight:600;cursor:pointer;font-family:inherit;transition:opacity .15s}
+    .gps-btn:hover{opacity:.85}
+    .gps-primary{background:var(--accent);color:#fff}
+    .gps-secondary{background:var(--bg);border:1px solid var(--border);color:var(--text)}
+    .gps-result{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:9px 12px;font-size:.82rem;color:var(--muted);line-height:1.5;min-height:38px}
+    .gps-result.inside{background:#fff7ed;border-color:#fdba74;color:#c2410c}
+    .gps-result.outside{background:#f0fdf4;border-color:#86efac;color:#15803d}
+    .coords-line{font-size:.7rem;color:var(--muted)}
+
+    /* accuracy */
+    .acc-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:5px}
+    .acc-val{font-size:.82rem;font-weight:700;color:var(--safe)}
+    .acc-track{height:6px;background:var(--border);border-radius:999px;overflow:hidden}
+    .acc-fill{height:100%;border-radius:999px;background:linear-gradient(90deg,#16a34a,#4ade80);transition:width 1s ease}
+
+    /* source */
+    .source-line{font-size:.72rem;color:var(--muted);border-top:1px solid var(--border);padding-top:.75rem;display:flex;justify-content:space-between}
+    .source-line strong{color:var(--text)}
+
+    /* responsive */
+    @media(max-width:860px){
+      body{overflow:auto}
+      .layout{grid-template-columns:1fr;grid-template-rows:50vh auto}
+      .panel{border-left:none;border-top:1px solid var(--border);max-height:none}
+    }
+  </style>
+</head>
+<body>
+
+<!-- TOPBAR -->
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-icon">🛰</div>
+    <div>
+      <div class="brand-name">MHEWS</div>
+      <div class="brand-sub">Multi-Hazard Early Warning · South Africa</div>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <span class="live-pill"><span class="live-dot"></span>LIVE</span>
+    <span id="live-clock">--:--:--</span>
+  </div>
+</header>
+
+<!-- LAYOUT -->
+<div class="layout">
+
+  <!-- MAP -->
+  <div class="map-wrap">
+    <div id="map"></div>
+    <div class="map-footer" id="map-status">Loading hazard data…</div>
+  </div>
+
+  <!-- PANEL -->
+  <aside class="panel">
+    <div class="loading-cover" id="loading-cover">
+      <div class="spinner"></div>
+      <p>Fetching live alerts…</p>
+    </div>
+
+    <div class="panel-inner">
+
+      <!-- queue nav -->
+      <div class="queue-row">
+        <span class="section-title">Active Alerts</span>
+        <div class="nav-btns">
+          <button class="nav-btn" id="prev-btn">← Prev</button>
+          <span class="nav-count" id="nav-count">— / —</span>
+          <button class="nav-btn" id="next-btn">Next →</button>
+        </div>
+      </div>
+
+      <!-- alert card -->
+      <div class="alert-card">
+        <div class="alert-card-top">
+          <div class="hazard-icon" id="hazard-icon">⚡</div>
+          <div class="alert-info">
+            <div id="alert-title">Loading…</div>
+            <div class="meta-row">
+              <span class="badge sev-severe" id="sev-badge">—</span>
+              <span class="badge badge-plain" id="urg-badge">—</span>
+            </div>
+            <div id="alert-time">—</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- expiry countdown -->
+      <div class="expiry-row">
+        <span class="expiry-label">⏱ Alert expires in</span>
+        <span id="expiry-val">—</span>
+      </div>
+
+      <!-- plain language -->
+      <div>
+        <div class="block-label">Plain language</div>
+        <div class="plain-box">
+          <p id="plain-text">—</p>
+          <button class="toggle-cap" id="toggle-cap-btn">Show original CAP text</button>
+        </div>
+        <div class="cap-raw" id="cap-raw">—</div>
+      </div>
+
+      <!-- language selector -->
+      <div>
+        <div class="block-label">Translate</div>
+        <div class="lang-row">
+          <label for="lang-select">Language</label>
+          <select id="lang-select">
+            <option value="en">English</option>
+            <option value="af">Afrikaans</option>
+            <option value="zu">Zulu (isiZulu)</option>
+            <option value="xh">Xhosa (isiXhosa)</option>
+            <option value="st">Sotho (Sesotho)</option>
+            <option value="nso">Northern Sotho (Sepedi)</option>
+            <option value="tn">Tswana (Setswana)</option>
+            <option value="ts">Tsonga (Xitsonga)</option>
+            <option value="ve">Venda (Tshivenda)</option>
+            <option value="nr">Ndebele (isiNdebele)</option>
+            <option value="ss">Swati (siSwati)</option>
+          </select>
+          <button class="translate-btn" id="translate-btn">Translate</button>
+        </div>
+      </div>
+
+      <!-- GPS check -->
+      <div class="gps-section">
+        <div class="block-label">Location check</div>
+        <div class="gps-btns">
+          <button class="gps-btn gps-primary" id="check-btn">📍 Check my location</button>
+          <button class="gps-btn gps-secondary" id="track-btn">🔴 Start tracking</button>
+        </div>
+        <div class="gps-result" id="gps-result">Tap to check if you are in the hazard zone.</div>
+        <div class="coords-line">Status: <span id="track-status">Not tracking</span> &nbsp;·&nbsp; <span id="coords">—</span></div>
+      </div>
+
+      <!-- accuracy -->
+      <div>
+        <div class="acc-row">
+          <span class="block-label" style="margin:0">Boundary accuracy (IoU)</span>
+          <span class="acc-val" id="acc-val">—</span>
+        </div>
+        <div class="acc-track"><div class="acc-fill" id="acc-fill" style="width:0%"></div></div>
+      </div>
+
+      <!-- source -->
+      <div class="source-line">
+        <span>Source: <strong id="source-name">—</strong></span>
+        <span id="hazard-cat">—</span>
+      </div>
+
+    </div>
+  </aside>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+// ═══════════════════════════════════════════════
+//  MHEWS — frontend/index.html
+//  F1-F8: full frontend wired to FastAPI backend
+// ═══════════════════════════════════════════════
+
+const API = 'http://localhost:8000';
+
+let alerts = [], idx = 0, layer = null, marker = null,
+    watchId = null, timer = null, rawVisible = false, alertId = null;
+
+const $ = id => document.getElementById(id);
+const els = {
+  title:     $('alert-title'), icon: $('hazard-icon'),
+  sev:       $('sev-badge'),   urg:  $('urg-badge'),
+  time:      $('alert-time'),  expiry: $('expiry-val'),
+  plain:     $('plain-text'),  capRaw: $('cap-raw'),
+  toggleCap: $('toggle-cap-btn'),
+  lang:      $('lang-select'), transBtn: $('translate-btn'),
+  checkBtn:  $('check-btn'),   trackBtn: $('track-btn'),
+  gpsRes:    $('gps-result'),  trackSt: $('track-status'),
+  coords:    $('coords'),      accVal:  $('acc-val'),
+  accFill:   $('acc-fill'),    source:  $('source-name'),
+  hazCat:    $('hazard-cat'),  navCount:$('nav-count'),
+  mapStatus: $('map-status'),  loading: $('loading-cover'),
+};
+
+// Hazard config
+const HZ = {
+  fire:           {icon:'🔥', bg:'#fff1f0', color:'#ff4500'},
+  hydrological:   {icon:'🌊', bg:'#eff6ff', color:'#1d4ed8'},
+  meteorological: {icon:'⛈️',  bg:'#f5f3ff', color:'#7c3aed'},
+  geophysical:    {icon:'🌋', bg:'#fef3c7', color:'#92400e'},
+  drought:        {icon:'☀️',  bg:'#fff7ed', color:'#c2410c'},
+  other:          {icon:'📡', bg:'#f0fdf4', color:'#15803d'},
+};
+const hz = c => HZ[c] || HZ.other;
+
+function sevClass(s) {
+  const v = (s||'').toLowerCase();
+  return v==='extreme'?'sev-extreme':v==='severe'?'sev-severe':
+         v==='moderate'?'sev-moderate':v==='minor'?'sev-minor':'sev-unknown';
+}
+
+// Map
+const map = L.map('map').setView([-29, 25], 5);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+  {attribution:'© OpenStreetMap',maxZoom:18}).addTo(map);
+
+// Clock
+setInterval(()=>{
+  $('live-clock').textContent = new Intl.DateTimeFormat('en-ZA',
+    {hour:'2-digit',minute:'2-digit',second:'2-digit',timeZoneName:'short'})
+    .format(new Date());
+}, 1000);
+
+function fmt(iso) {
+  if (!iso) return '—';
+  return new Intl.DateTimeFormat('en-ZA',
+    {day:'numeric',month:'short',hour:'2-digit',minute:'2-digit',timeZoneName:'short'})
+    .format(new Date(iso));
+}
+
+// F5 — expiry countdown
+function startCountdown(exp) {
+  if (timer) clearInterval(timer);
+  function tick() {
+    const d = new Date(exp) - new Date();
+    if (d <= 0) { els.expiry.textContent='Expired'; clearInterval(timer); return; }
+    const h=Math.floor(d/3600000), m=Math.floor((d%3600000)/60000), s=Math.floor((d%60000)/1000);
+    els.expiry.textContent = `${h}h ${String(m).padStart(2,'0')}m ${String(s).padStart(2,'0')}s`;
+  }
+  tick(); timer = setInterval(tick, 1000);
+}
+
+// F8 — raw CAP toggle
+els.toggleCap.addEventListener('click', () => {
+  rawVisible = !rawVisible;
+  els.capRaw.classList.toggle('visible', rawVisible);
+  els.toggleCap.textContent = rawVisible ? 'Hide original CAP text' : 'Show original CAP text';
+});
+
+// Render alert
+function render(a) {
+  if (!a) return;
+  alertId = a.id; rawVisible = false;
+  els.capRaw.classList.remove('visible');
+  els.toggleCap.textContent = 'Show original CAP text';
+
+  const h = hz(a.hazard_category);
+  els.icon.textContent = h.icon;
+  els.icon.style.background = h.bg;
+  els.title.textContent = a.event || 'Unknown Alert';
+  els.sev.textContent = a.severity || '—';
+  els.sev.className = 'badge ' + sevClass(a.severity);
+  els.urg.textContent = a.urgency || '—';
+  els.time.textContent = `${fmt(a.onset)} → ${fmt(a.expires)}`;
+  if (a.expires) startCountdown(a.expires);
+  els.plain.textContent = a.plain_text || a.description || '—';
+  els.capRaw.textContent = a.description || '—';
+  const acc = a.accuracy_percent;
+  if (acc != null) {
+    els.accVal.textContent = acc + '%';
+    els.accFill.style.width = acc + '%';
+    els.accFill.style.background = acc>=70
+      ? 'linear-gradient(90deg,#16a34a,#4ade80)'
+      : acc>=40
+      ? 'linear-gradient(90deg,#d97706,#fbbf24)'
+      : 'linear-gradient(90deg,#dc2626,#f87171)';
+  } else {
+    els.accVal.textContent = 'Calculating…';
+    els.accFill.style.width = '0%';
+  }
+  els.source.textContent = a.source || '—';
+  els.hazCat.textContent = (a.hazard_category || 'other').toUpperCase();
+  els.navCount.textContent = `${idx+1} / ${alerts.length}`;
+  els.gpsRes.textContent = 'Tap to check if you are in the hazard zone.';
+  els.gpsRes.className = 'gps-result';
+  drawMap(a, h.color);
+  els.mapStatus.textContent = 'Showing: ' + a.event;
+}
+
+function drawMap(a, color) {
+  if (layer) map.removeLayer(layer);
+  if (!a.polygon?.coordinates) return;
+  const coords = a.polygon.coordinates[0].map(c => [c[1], c[0]]);
+  layer = L.polygon(coords, {
+    color, fillColor: color, fillOpacity: .18, weight: 2.5, dashArray: '6 4'
+  }).addTo(map);
+  layer.bindPopup(`<strong>${a.event}</strong><br/>${a.area_desc||''}`);
+  map.flyToBounds(layer.getBounds(), {padding:[40,40], duration:1});
+}
+
+// F2 — fetch alerts from API
+async function loadAlerts() {
+  try {
+    const r = await fetch(`${API}/alerts`);
+    const d = await r.json();
+    alerts = d.alerts || [];
+    els.loading.classList.add('gone');
+    if (!alerts.length) {
+      els.title.textContent = 'No active alerts at this time';
+      els.mapStatus.textContent = 'No active alerts';
+      return;
+    }
+    idx = 0; render(alerts[0]);
+  } catch(e) {
+    els.loading.classList.add('gone');
+    els.title.textContent = 'Cannot reach API — is Docker running?';
+    els.mapStatus.textContent = '⚠️ API unavailable';
+  }
+}
+
+$('prev-btn').onclick = () => { if(!alerts.length)return; idx=(idx-1+alerts.length)%alerts.length; render(alerts[idx]); };
+$('next-btn').onclick = () => { if(!alerts.length)return; idx=(idx+1)%alerts.length; render(alerts[idx]); };
+
+// F6 — translate
+els.transBtn.addEventListener('click', async () => {
+  if (!alertId) return;
+  const lang = els.lang.value;
+  els.transBtn.disabled = true;
+  els.transBtn.textContent = 'Translating…';
+  els.plain.textContent = 'Translating…';
+  try {
+    const r = await fetch(`${API}/alerts/translate`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({alert_id: alertId, language: lang})
+    });
+    const d = await r.json();
+    els.plain.textContent = d.plain_text || 'Translation failed';
+    if (d.plain_text) alerts[idx].plain_text = d.plain_text;
+  } catch(e) {
+    els.plain.textContent = 'Translation service unavailable';
+  } finally {
+    els.transBtn.disabled = false;
+    els.transBtn.textContent = 'Translate';
+  }
+});
+
+// F3 — GPS check via API
+async function checkLoc(lat, lon) {
+  try {
+    const r = await fetch(`${API}/alerts/check`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({lat, lon})
+    });
+    const d = await r.json();
+    els.gpsRes.textContent = d.message || '—';
+    els.gpsRes.className = 'gps-result ' + (d.inside ? 'inside' : 'outside');
+  } catch(e) {
+    els.gpsRes.textContent = 'Could not reach location check service';
+  }
+}
+
+function placeMarker(lat, lon) {
+  if (marker) map.removeLayer(marker);
+  marker = L.circleMarker([lat,lon], {
+    radius:8, color:vars('--accent'), weight:2,
+    fillColor:'#2563eb', fillOpacity:.9
+  }).addTo(map).bindPopup('Your location');
+}
+
+function vars(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+els.checkBtn.addEventListener('click', () => {
+  if (!navigator.geolocation) { els.gpsRes.textContent='Geolocation not supported.'; return; }
+  els.gpsRes.textContent = '📍 Getting your location…';
+  els.gpsRes.className = 'gps-result';
+  navigator.geolocation.getCurrentPosition(
+    ({coords:{latitude:lat,longitude:lon}}) => {
+      els.coords.textContent = `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+      checkLoc(lat, lon);
+      placeMarker(lat, lon);
+    },
+    () => { els.gpsRes.textContent = 'Location access denied.'; },
+    {enableHighAccuracy:true, timeout:15000}
+  );
+});
+
+els.trackBtn.addEventListener('click', () => {
+  if (watchId !== null) {
+    navigator.geolocation.clearWatch(watchId); watchId=null;
+    els.trackBtn.textContent='🔴 Start tracking';
+    els.trackSt.textContent='Not tracking';
+    if(marker){map.removeLayer(marker);marker=null;}
+    els.gpsRes.textContent='Live tracking stopped.';
+    els.gpsRes.className='gps-result';
+    return;
+  }
+  if (!navigator.geolocation) { els.gpsRes.textContent='Geolocation not supported.'; return; }
+  els.trackBtn.textContent='⬛ Stop tracking';
+  els.trackSt.textContent='Tracking…';
+  watchId = navigator.geolocation.watchPosition(
+    ({coords:{latitude:lat,longitude:lon}}) => {
+      els.coords.textContent=`${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+      els.trackSt.textContent='Live';
+      checkLoc(lat,lon); placeMarker(lat,lon);
+    },
+    () => { els.gpsRes.textContent='Location access denied.'; },
+    {enableHighAccuracy:true, maximumAge:3000, timeout:15000}
+  );
+});
+
+// Boot
+loadAlerts();
+setInterval(loadAlerts, 5*60*1000);
+</script>
+</body>
+</html>
