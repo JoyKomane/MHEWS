@@ -1,4 +1,4 @@
-==========================================================
+# ============================================================
 #  MHEWS — backend/main.py
 #  B4: The FastAPI application scaffold.
 #
@@ -157,6 +157,7 @@ async def shutdown():
     Runs when the FastAPI server stops (Ctrl+C or container stop).
     Closes the database connection pool cleanly.
     """
+    scheduler.shutdown(wait=False)
     await database.disconnect()
     print("🛑 MHEWS API stopped — database disconnected.")
 
@@ -234,6 +235,33 @@ app.include_router(alerts_router)
 # B9 — translation endpoint
 from backend.translate import router as translate_router
 app.include_router(translate_router)
+
+# ============================================================
+#  B10 — Background feed polling (APScheduler)
+# ============================================================
+#  Polls the SAWS CAP feed every 5 minutes automatically.
+#  When the feed is live, new alerts appear without any
+#  manual action. Uses APScheduler AsyncIOScheduler so it
+#  runs inside the same async event loop as FastAPI.
+# ============================================================
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from gis.ingestor import poll_all_feeds
+
+scheduler = AsyncIOScheduler(timezone="Africa/Johannesburg")
+
+@app.on_event("startup")
+async def start_scheduler():
+    scheduler.add_job(
+        poll_all_feeds,
+        trigger='interval',
+        minutes=5,
+        id='cap_feed_poll',
+        name='Poll CAP feeds every 5 minutes',
+        replace_existing=True,
+        misfire_grace_time=60,
+    )
+    scheduler.start()
+    print("⏰ Feed polling started — every 5 minutes (Africa/Johannesburg)")
 
 # ============================================================
 #  NOTE: More endpoints added in the next steps:

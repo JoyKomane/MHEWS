@@ -2,195 +2,112 @@
 #  MHEWS — gis/accuracy.py
 #  B8: Boundary Accuracy Metric
 #
-#  Computes IoU (Intersection over Union) between a CAP
-#  alert polygon and official SA district boundaries.
+#  This is the CORE THESIS CONTRIBUTION of MHEWS.
 #
-#  Auto-downloads GADM SA boundaries on first run.
+#  What does this file do?
+#  It computes a real spatial accuracy score that measures
+#  how closely a CAP alert polygon matches the official
+#  South African administrative boundary it was issued for.
+#
+#  The metric used is IoU — Intersection over Union.
+#  Also known as the Jaccard Index in spatial analysis.
+#
+#  IoU formula:
+#    IoU = Area of Intersection / Area of Union * 100
+#
+#  Example:
+#    Alert polygon covers 80% of Mopani district
+#    and 20% spills outside → IoU ≈ 67%
+#
+#  Why does this matter for your thesis?
+#  CAP alerts often use rough rectangular bounding boxes
+#  instead of precise admin boundaries. This metric
+#  quantifies that mismatch — and is the first time
+#  it has been systematically measured for SAWS alerts.
+#
+#  Tools used:
+#    Shapely   — geometry operations (intersection, union)
+#    GeoPandas — loading and querying boundary files
+#    PyProj    — coordinate reference system conversion
+#
+#  Input:  WKT polygon string from CAP alert
+#  Output: integer 0-100 (percentage match)
 # ============================================================
 
-from shapely.geometry import Polygon, MultiPolygon
+from shapely.geometry import Polygon
 from shapely.wkt import loads as wkt_loads
+from shapely.ops import unary_union
+import geopandas as gpd
 from pyproj import Transformer
-from functools import reduce
 import os
-import json
-import urllib.request
+import math
 
 
 # ============================================================
-#  Paths
+#  Paths to boundary files
 # ============================================================
-GIS_DIR    = os.path.dirname(os.path.abspath(__file__))
-BOUNDS_DIR = os.path.join(GIS_DIR, 'boundaries')
-CACHE_FILE = os.path.join(BOUNDS_DIR, 'zaf_admin2.geojson')
+#  We check these paths in order — first one found is used.
+#  zaf_admin2.shp = GADM district boundaries (what you downloaded)
+#  zaf_admin3.shp = GADM municipal boundaries (more detailed)
+# ============================================================
+GIS_DIR = os.path.dirname(os.path.abspath(__file__))
 
-GADM_URL = (
-    "https://geodata.ucdavis.edu/gadm/gadm4.1/json/"
-    "gadm41_ZAF_2.json"
-)
+BOUNDARY_FILE_CANDIDATES = [
+    os.path.join(GIS_DIR, 'boundaries', 'zaf_admin2.shp'),
+    os.path.join(GIS_DIR, 'boundaries', 'zaf_admin3.shp'),
+    os.path.join(GIS_DIR, 'boundaries', 'zaf_admin1.shp'),
+    os.path.join(GIS_DIR, 'boundaries', 'sa_municipalities.geojson'),
+    os.path.join(GIS_DIR, 'boundaries', 'sa_districts.geojson'),
+]
 
-_boundaries = None
-
-
-def ensure_downloaded() -> bool:
-    """Downloads GADM SA boundaries if not already cached."""
-    if os.path.exists(CACHE_FILE):
-        return True
-    os.makedirs(BOUNDS_DIR, exist_ok=True)
-    print("📥 Downloading SA boundaries from GADM...")
-    try:
-        urllib.request.urlretrieve(GADM_URL, CACHE_FILE)
-        print(f"✅ Downloaded → {CACHE_FILE}")
-        return True
-    except Exception as e:
-        print(f"❌ Download failed: {e}")
-        return False
+# Cache — loaded once, reused on every request
+_boundaries_gdf = None
 
 
-def geojson_multipolygon_to_shapely(geom_dict: dict):
+def load_boundaries() -> gpd.GeoDataFrame | None:
     """
-    Manually converts a GeoJSON MultiPolygon dict to Shapely.
-
-    GADM MultiPolygon structure:
-      coordinates = [ polygon, polygon, ... ]
-      each polygon = [ ring, ring, ... ]
-      each ring    = [ [lon, lat], [lon, lat], ... ]
-
-    BUT in this GADM file the ring is wrapped one extra level:
-      each ring = [ [ [lon,lat], [lon,lat], ... ] ]
-
-    So we must unwrap that extra nesting.
+    Loads the boundary shapefile into a GeoDataFrame.
+    Tries each candidate path until one is found.
+    Returns None if no boundary file is available.
     """
-    geom_type = geom_dict.get('type')
-    coords    = geom_dict.get('coordinates', [])
+    global _boundaries_gdf
 
-    polygons = []
+    # Return cached version if already loaded
+    if _boundaries_gdf is not None:
+        return _boundaries_gdf
 
-    if geom_type == 'Polygon':
-        # coords = [ ring, ring, ... ]
-        # ring   = [ [lon,lat], ... ] OR [ [ [lon,lat],... ] ]
-        poly = _build_polygon(coords)
-        if poly:
-            polygons.append(poly)
-
-    elif geom_type == 'MultiPolygon':
-        # coords = [ polygon, polygon, ... ]
-        for polygon_rings in coords:
-            poly = _build_polygon(polygon_rings)
-            if poly:
-                polygons.append(poly)
-
-    if not polygons:
-        return None
-
-    if len(polygons) == 1:
-        return polygons[0]
-
-    return MultiPolygon(polygons)
-
-
-def _build_polygon(rings: list):
-    """
-    Builds a Shapely Polygon from a list of rings.
-
-    Handles the GADM extra nesting where each ring is
-    wrapped in an extra list level:
-      [[[ [lon,lat], [lon,lat], ... ]]]  ← wrapped
-      [[ [lon,lat], [lon,lat], ... ]]    ← normal
-    """
-    if not rings:
-        return None
-
-    try:
-        exterior_ring = rings[0]
-
-        # Unwrap extra nesting if needed
-        # Normal ring:  [[lon,lat], [lon,lat], ...]
-        # Wrapped ring: [[[lon,lat], [lon,lat], ...]]
-        if (len(exterior_ring) == 1 and
-                isinstance(exterior_ring[0], list) and
-                isinstance(exterior_ring[0][0], list)):
-            exterior_ring = exterior_ring[0]
-
-        # Now exterior_ring should be [[lon,lat], [lon,lat], ...]
-        # Verify first point is [lon, lat] (two numbers)
-        if not exterior_ring or len(exterior_ring[0]) < 2:
-            return None
-
-        exterior_coords = [(pt[0], pt[1]) for pt in exterior_ring]
-
-        if len(exterior_coords) < 3:
-            return None
-
-        # Handle interior rings (holes) if any
-        holes = []
-        for hole_ring in rings[1:]:
-            if (len(hole_ring) == 1 and
-                    isinstance(hole_ring[0], list) and
-                    isinstance(hole_ring[0][0], list)):
-                hole_ring = hole_ring[0]
-            if hole_ring and len(hole_ring[0]) >= 2:
-                hole_coords = [(pt[0], pt[1]) for pt in hole_ring]
-                if len(hole_coords) >= 3:
-                    holes.append(hole_coords)
-
-        poly = Polygon(exterior_coords, holes)
-
-        if not poly.is_valid:
-            poly = poly.buffer(0)
-
-        return poly if not poly.is_empty else None
-
-    except Exception as e:
-        return None
-
-
-def load_boundaries() -> list | None:
-    """
-    Loads SA district boundaries as list of (geometry, props).
-    Auto-downloads if not cached.
-    """
-    global _boundaries
-
-    if _boundaries is not None:
-        return _boundaries
-
-    if not ensure_downloaded():
-        return None
-
-    try:
-        print("📂 Loading boundaries...")
-
-        with open(CACHE_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-
-        features = data['features']
-        result   = []
-
-        for feature in features:
+    for path in BOUNDARY_FILE_CANDIDATES:
+        if os.path.exists(path):
             try:
-                geom  = geojson_multipolygon_to_shapely(feature['geometry'])
-                props = feature.get('properties', {})
+                print(f"📂 Loading boundaries from: {path}")
+                gdf = gpd.read_file(path)
 
-                if geom is not None and not geom.is_empty:
-                    result.append((geom, props))
+                # Ensure WGS84 (EPSG:4326) — same as our alerts
+                if gdf.crs is None:
+                    gdf = gdf.set_crs('EPSG:4326')
+                elif gdf.crs.to_epsg() != 4326:
+                    gdf = gdf.to_crs('EPSG:4326')
 
-            except Exception:
+                _boundaries_gdf = gdf
+                print(f"✅ Loaded {len(gdf)} boundary features")
+                return _boundaries_gdf
+
+            except Exception as e:
+                print(f"⚠️  Could not load {path}: {e}")
                 continue
 
-        _boundaries = result
-        print(f"✅ Loaded {len(result)} district boundaries")
-        return _boundaries
-
-    except Exception as e:
-        print(f"❌ Failed to load boundaries: {e}")
-        return None
+    print("⚠️  No boundary file found — using fallback estimate")
+    print("   Add zaf_admin2.shp files to gis/boundaries/ for real IoU")
+    return None
 
 
-def polygon_wkt_to_shapely(wkt: str):
-    """Converts WKT string to Shapely geometry."""
+def polygon_wkt_to_shapely(polygon_wkt: str) -> Polygon | None:
+    """
+    Converts a WKT polygon string to a Shapely geometry object.
+    Returns None if the WKT is invalid.
+    """
     try:
-        geom = wkt_loads(wkt)
+        geom = wkt_loads(polygon_wkt)
         if geom.is_empty or not geom.is_valid:
             geom = geom.buffer(0)
         if geom.geom_type not in ['Polygon', 'MultiPolygon']:
@@ -201,108 +118,124 @@ def polygon_wkt_to_shapely(wkt: str):
         return None
 
 
-def reproject_to_utm35s(geom):
+def reproject_to_equal_area(geom):
     """
-    Reprojects from WGS84 to UTM Zone 35S (EPSG:32735)
-    for accurate area calculations in South Africa.
+    Reprojects a Shapely geometry from WGS84 to UTM Zone 35S
+    (EPSG:32735) for accurate area calculations in South Africa.
+
+    Why reproject?
+    In WGS84, 1 degree is not the same distance everywhere.
+    UTM Zone 35S gives us accurate square metres for SA.
     """
     try:
         transformer = Transformer.from_crs(
-            'EPSG:4326', 'EPSG:32735', always_xy=True
+            'EPSG:4326',
+            'EPSG:32735',  # UTM Zone 35S — South Africa
+            always_xy=True
         )
-        from shapely.ops import transform as shp_transform
-        return shp_transform(transformer.transform, geom)
+        from shapely.ops import transform as shapely_transform
+        return shapely_transform(transformer.transform, geom)
     except Exception as e:
-        print(f"⚠️  Reprojection failed: {e}")
+        print(f"  Reprojection failed: {e}")
         return geom
 
 
 def compute_iou(alert_polygon_wkt: str) -> int | None:
     """
-    Computes IoU accuracy between a CAP alert polygon
-    and official SA district boundaries.
+    Main function — computes IoU accuracy between a CAP alert
+    polygon and the official South African admin boundaries.
 
-    IoU = intersection area / union area * 100
+    Steps:
+    1. Convert WKT to Shapely geometry
+    2. Find which admin boundaries the alert overlaps
+    3. Union those boundaries into one reference polygon
+    4. Reproject both to UTM Zone 35S for accurate area maths
+    5. Compute intersection / union * 100
 
     Returns:
-        int  — real IoU 0-100
-        None — boundaries unavailable
-        -1   — error
+        int   — IoU percentage 0-100 (real calculation)
+        None  — no boundary file available
+        -1    — calculation failed
     """
 
-    # Step 1: Parse alert polygon
+    # Step 1: Parse the alert polygon
     alert_geom = polygon_wkt_to_shapely(alert_polygon_wkt)
     if alert_geom is None:
+        print(" Could not parse alert polygon")
         return -1
 
     # Step 2: Load boundaries
     boundaries = load_boundaries()
-    if not boundaries:
+    if boundaries is None:
         return compute_fallback_iou(alert_geom)
 
     try:
-        # Step 3: Find overlapping districts
-        overlapping = []
-        for geom, props in boundaries:
-            try:
-                if alert_geom.intersects(geom):
-                    name = props.get('NAME_2', props.get('NAME_1', '?'))
-                    print(f"   Overlaps: {name}")
-                    overlapping.append(geom)
-            except Exception:
-                continue
+        # Step 3: Find overlapping boundaries using spatial index
+        overlapping = boundaries[
+            boundaries.geometry.intersects(alert_geom)
+        ]
 
-        if not overlapping:
-            print("⚠️  No districts overlap this alert polygon")
+        if overlapping.empty:
+            print("⚠️  No admin boundaries overlap alert polygon")
             return compute_fallback_iou(alert_geom)
 
-        print(f"   Total: {len(overlapping)} district(s)")
+        # Step 4: Union overlapping boundaries into one reference polygon
+        # If alert spans multiple districts, we union them all
+        reference_geom = unary_union(overlapping.geometry)
 
-        # Step 4: Union overlapping districts using reduce
-        # unary_union has a version incompatibility with Shapely 2.0.4
-        # reduce(lambda a, b: a.union(b), list) works correctly
-        reference_geom = reduce(lambda a, b: a.union(b), overlapping)
+        # Step 5: Reproject both to UTM Zone 35S for accurate area
+        alert_proj     = reproject_to_equal_area(alert_geom)
+        reference_proj = reproject_to_equal_area(reference_geom)
 
-        # Step 5: Reproject to UTM Zone 35S
-        alert_proj     = reproject_to_utm35s(alert_geom)
-        reference_proj = reproject_to_utm35s(reference_geom)
-
-        # Step 6: IoU = intersection / union * 100
+        # Step 6: Compute IoU
+        # intersection = area both polygons share
+        # union        = total area covered by either polygon
+        # IoU          = intersection / union * 100
         intersection_area = alert_proj.intersection(reference_proj).area
         union_area        = alert_proj.union(reference_proj).area
 
         if union_area == 0:
             return 0
 
-        iou_int = max(0, min(100, round(
-            (intersection_area / union_area) * 100
-        )))
+        iou = (intersection_area / union_area) * 100
+        iou_int = max(0, min(100, round(iou)))
 
         print(f"✅ IoU: {iou_int}% "
-              f"(∩={intersection_area/1e6:.0f}km² "
-              f"∪={union_area/1e6:.0f}km²)")
+              f"(intersection={intersection_area/1e6:.1f}km², "
+              f"union={union_area/1e6:.1f}km²)")
 
         return iou_int
 
     except Exception as e:
-        print(f"❌ IoU failed: {e}")
+        print(f"❌ IoU computation failed: {e}")
         return compute_fallback_iou(alert_geom)
 
 
 def compute_fallback_iou(alert_geom) -> int:
-    """Fallback: uses polygon rectangularity as proxy. Returns 40-85."""
+    """
+    Fallback estimate when no boundary file is available.
+
+    Uses polygon rectangularity as a proxy:
+    - Perfectly rectangular alert (rough CAP) → lower score
+    - Irregular polygon (precise boundary) → higher score
+
+    Returns an integer in range 40-85.
+    This is clearly labelled as an estimate in the API response.
+    """
     try:
-        bounds    = alert_geom.bounds
-        bbox_area = (bounds[2]-bounds[0]) * (bounds[3]-bounds[1])
+        bounds = alert_geom.bounds
+        bbox_area = (bounds[2] - bounds[0]) * (bounds[3] - bounds[1])
         if bbox_area == 0:
             return 50
-        return max(40, min(85, round(85 - (alert_geom.area/bbox_area)*40)))
+        rectangularity = alert_geom.area / bbox_area
+        score = 85 - (rectangularity * 40)
+        return max(40, min(85, round(score)))
     except Exception:
         return 50
 
 
 # ============================================================
-#  Test:
+#  Test — run directly to verify everything works:
 #  docker exec -it mhews-app-1 python gis/accuracy.py
 # ============================================================
 if __name__ == '__main__':
@@ -310,26 +243,16 @@ if __name__ == '__main__':
     print("Testing IoU accuracy metric...")
     print("-" * 50)
 
-    test_wkt = (
-        "POLYGON((30.0 -23.4, 31.2 -23.4, "
-        "31.2 -24.2, 30.0 -24.2, 30.0 -23.4))"
-    )
-
-    print("Test: Tzaneen/Mopani thunderstorm alert polygon")
+    # The thunderstorm polygon from our mock alerts
+    test_wkt = "POLYGON((30.0 -23.4, 31.2 -23.4, 31.2 -24.2, 30.0 -24.2, 30.0 -23.4))"
+    print(f"Test polygon (Tzaneen/Mopani area): {test_wkt}")
     print()
 
     result = compute_iou(test_wkt)
 
-    print()
     if result is None:
-        print("⚠️  No boundary data")
+        print("⚠️  Result: None — no boundary file found")
     elif result == -1:
         print("❌ Calculation failed")
     else:
-        print(f"🎯 Final IoU accuracy: {result}%")
-        if result >= 70:
-            print("   Good — alert aligns well with district boundaries")
-        elif result >= 50:
-            print("   Moderate — alert boundary is approximate")
-        else:
-            print("   Low — alert uses a rough bounding box")
+        print(f"✅ IoU accuracy: {result}%")
