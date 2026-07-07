@@ -2,14 +2,15 @@
 #  MHEWS — gis/ingestor.py
 #  B10: CAP Feed Ingestor with fallback chain
 #
-#  Feed priority order:
-#  1. SAWS (official SA feed — restricted, tries anyway)
-#  2. GDACS (UN global hazards — always works)
-#  3. NASA EONET (NASA natural events — always works)
-#  4. ReliefWeb (UN humanitarian alerts)
+#  WHERE TO ADD: MHEWS/gis/ folder (replaces existing ingestor.py)
 #
-#  If feed 1 fails → silently tries feed 2
-#  If feed 2 fails → silently tries feed 3
+#  Feed priority order (see gis/cap_sources.py for full registry):
+#  1. SAWS         — official SA feed (restricted, tries anyway)
+#  2. GDACS        — UN global hazards
+#  3. NASA EONET   — satellite natural events (wildfires, floods)
+#  4. NWS (US)     — proves global scalability — clean GeoJSON API
+#
+#  If a source fails → silently tries the next
 #  Frontend never sees errors — always gets data
 # ============================================================
 
@@ -17,10 +18,11 @@ import asyncio
 import asyncpg
 import os
 import sys
+import re
+import json
 import urllib.request
 import urllib.error
-import json
-from datetime import datetime, timezone
+from datetime import datetime
 from lxml import etree
 
 sys.path.insert(0, '/usr/src/app')
@@ -35,7 +37,7 @@ DATABASE_URL = os.getenv(
 )
 
 # ============================================================
-#  Feed chain — tried in order, first success wins
+#  Feed chain — tried in order, all results combined
 # ============================================================
 FEED_CHAIN = [
     {
@@ -45,22 +47,22 @@ FEED_CHAIN = [
         'desc':  'South African Weather Service (official)',
     },
     {
-        'name':  'GDACS',
-        'url':   'https://www.gdacs.org/xml/rss.xml',
-        'type':  'gdacs_rss',
-        'desc':  'Global Disaster Alert and Coordination System (UN)',
+        'name':  'GDACS CAP',
+        'url':   'https://www.gdacs.org/contentdata/xml/gdacs_cap.xml',
+        'type':  'gdacs_cap_direct',
+        'desc':  'GDACS direct CAP XML feed (UN)',
     },
     {
         'name':  'NASA EONET',
-        'url':   'https://eonet.gsfc.nasa.gov/api/v3/events?status=open&bbox=10,-40,55,-20',
+        'url':   'https://eonet.gsfc.nasa.gov/api/v3/events?status=open',
         'type':  'nasa_eonet',
-        'desc':  'NASA Earth Observatory Natural Event Tracker (Africa bbox)',
+        'desc':  'NASA Earth Observatory Natural Event Tracker',
     },
     {
-        'name':  'ReliefWeb',
-        'url':   'https://api.reliefweb.int/v1/disasters?appname=mhews&profile=list&preset=latest&fields[include][]=name&fields[include][]=country&fields[include][]=date&fields[include][]=status&filter[field]=country.iso3&filter[value]=ZAF',
-        'type':  'reliefweb',
-        'desc':  'ReliefWeb UN humanitarian alerts (South Africa)',
+        'name':  'NWS (US)',
+        'url':   'https://api.weather.gov/alerts/active?status=actual&message_type=alert',
+        'type':  'nws_geojson',
+        'desc':  'US National Weather Service — proves global CAP scalability',
     },
 ]
 
@@ -72,11 +74,15 @@ def fetch_url(url: str, timeout: int = 15) -> bytes | None:
     try:
         req = urllib.request.Request(
             url,
-            headers={'User-Agent': 'MHEWS/1.0 (MSc Thesis NWU South Africa)'}
+            headers={
+                'User-Agent': 'MHEWS/1.0 (MSc Thesis NWU South Africa; contact: joykomane-research)',
+                'Accept': 'application/geo+json',
+            }
         )
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.read()
-    except Exception:
+    except Exception as e:
+        print(f"  ⚠️  Fetch error: {e}")
         return None
 
 
@@ -87,7 +93,6 @@ def parse_dt(dt_str: str):
     if not dt_str:
         return None
     try:
-        import re
         dt_str = re.sub(r'([+-]\d{2}):(\d{2})$', r'\1\2', dt_str)
         return datetime.strptime(dt_str, '%Y-%m-%dT%H:%M:%S%z')
     except Exception:
@@ -117,7 +122,7 @@ def extract_cap_urls_from_rss(rss_bytes: bytes) -> list[str]:
 
 
 # ============================================================
-#  Parse multi-area CAP XML
+#  Parse multi-area CAP XML (standard OASIS CAP 1.2)
 # ============================================================
 def parse_cap_all_areas(xml_bytes: bytes) -> list[dict]:
     results = []
@@ -212,7 +217,7 @@ def parse_cap_all_areas(xml_bytes: bytes) -> list[dict]:
 
 
 # ============================================================
-#  Parse NASA EONET JSON into alert records
+#  Parse NASA EONET JSON
 # ============================================================
 def parse_nasa_eonet(data: bytes) -> list[dict]:
     results = []
@@ -229,16 +234,13 @@ def parse_nasa_eonet(data: bytes) -> list[dict]:
             if not geometries:
                 continue
 
-            # Use the most recent geometry
             geom = geometries[-1]
             coords = geom.get('coordinates', [])
             geom_type = geom.get('type', '')
             date = geom.get('date', '')
 
             polygon_wkt = ''
-
             if geom_type == 'Point' and len(coords) >= 2:
-                # Convert point to small bounding box (0.5 degree radius)
                 lon, lat = coords[0], coords[1]
                 polygon_wkt = (
                     f"POLYGON(({lon-0.5} {lat-0.5}, {lon+0.5} {lat-0.5}, "
@@ -281,6 +283,86 @@ def parse_nasa_eonet(data: bytes) -> list[dict]:
 
 
 # ============================================================
+#  NEW — Parse NWS (US) GeoJSON alerts
+#
+#  api.weather.gov returns GeoJSON FeatureCollection.
+#  Each feature has a polygon geometry and CAP-equivalent
+#  properties (event, severity, urgency, description, etc).
+#  This proves MHEWS can ingest ANY WMO-member country's
+#  alerting authority with the same architecture.
+# ============================================================
+def parse_nws_geojson(data: bytes) -> list[dict]:
+    results = []
+    try:
+        obj = json.loads(data)
+        features = obj.get('features', [])
+
+        for feature in features:
+            props = feature.get('properties', {})
+            geom  = feature.get('geometry')
+
+            if not geom:
+                # Zone-based alerts have no polygon — skip (need geometry for GIS)
+                continue
+
+            event       = props.get('event', 'Unknown')
+            severity    = props.get('severity', 'Unknown')
+            urgency     = props.get('urgency', 'Unknown')
+            description = props.get('description', '') or ''
+            instruction = props.get('instruction', '') or ''
+            onset       = props.get('onset', '') or props.get('effective', '') or ''
+            expires     = props.get('expires', '') or props.get('ends', '') or ''
+            sender_name = props.get('senderName', 'US National Weather Service')
+            area_desc   = props.get('areaDesc', '')
+            alert_id    = props.get('id', '') or feature.get('id', '')
+
+            geom_type = geom.get('type', '')
+            coords    = geom.get('coordinates', [])
+
+            polygon_wkt = ''
+            if geom_type == 'Polygon' and coords:
+                ring = coords[0]
+                if ring:
+                    pts = ', '.join(f"{p[0]} {p[1]}" for p in ring)
+                    polygon_wkt = f"POLYGON(({pts}))"
+            elif geom_type == 'MultiPolygon' and coords:
+                # Use the first polygon in the multipolygon
+                ring = coords[0][0] if coords and coords[0] else []
+                if ring:
+                    pts = ', '.join(f"{p[0]} {p[1]}" for p in ring)
+                    polygon_wkt = f"POLYGON(({pts}))"
+
+            if not polygon_wkt or not alert_id:
+                continue
+
+            # Make ID filesystem/db safe
+            safe_id = f"NWS-{alert_id.split('/')[-1]}" if '/' in alert_id else f"NWS-{alert_id}"
+
+            results.append({
+                'id':               safe_id,
+                'event':            event,
+                'severity':         severity,
+                'urgency':          urgency,
+                'description':      description,
+                'instruction':      instruction,
+                'onset':            onset,
+                'expires':          expires,
+                'source':           sender_name,
+                'area_desc':        area_desc,
+                'hazard_category':  get_hazard_category(event),
+                'polygon_wkt':      polygon_wkt,
+                'plain_text':       None,
+                'plain_text_language': 'en',
+                'accuracy_percent': None,
+            })
+
+    except Exception as e:
+        print(f"  ⚠️  NWS GeoJSON parse error: {e}")
+
+    return results
+
+
+# ============================================================
 #  Upsert alerts into PostGIS
 # ============================================================
 async def upsert_alerts(conn, alerts: list[dict]) -> int:
@@ -304,24 +386,23 @@ async def upsert_alerts(conn, alerts: list[dict]) -> int:
             """,
                 alert['id'], alert['event'], alert['severity'],
                 alert['urgency'], alert['description'], alert['instruction'],
-                parse_dt(alert['onset']), parse_dt(alert['expires']),
+                parse_dt(alert['onset']),
+                parse_dt(alert['expires']) or parse_dt(alert['onset']),
                 alert['source'], alert['area_desc'],
                 alert['plain_text'], alert['plain_text_language'],
                 alert['accuracy_percent'], alert['hazard_category'],
                 alert['polygon_wkt'],
             )
             if result == 'INSERT 0 1':
-                print(f"  ✅ {alert['area_desc']} ({alert['event']})")
+                print(f"  ✅ {alert['area_desc'][:50]} ({alert['event']})")
                 inserted += 1
-            else:
-                print(f"  ⏭  Already exists: {alert['id'][:50]}")
         except Exception as e:
-            print(f"  ❌ DB error: {e}")
+            print(f"  ❌ DB error for {alert['id'][:40]}: {e}")
     return inserted
 
 
 # ============================================================
-#  Main poll — tries each feed in order, stops at first success
+#  Main poll — tries each feed, combines all successful results
 # ============================================================
 async def poll_all_feeds():
     print(f"\n{'='*55}")
@@ -343,17 +424,25 @@ async def poll_all_feeds():
             print(f"  ✅ Connected — parsing alerts")
             alerts = []
 
-            if feed['type'] in ('cap_rss', 'gdacs_rss'):
+            if feed['type'] == 'cap_rss':
                 cap_urls = extract_cap_urls_from_rss(data)
-                print(f"  Found {len(cap_urls)} alert(s) in feed")
+                print(f"  Found {len(cap_urls)} alert URL(s) in feed")
                 for url in cap_urls[:20]:
                     cap_data = fetch_url(url)
                     if cap_data:
                         alerts.extend(parse_cap_all_areas(cap_data))
 
+            elif feed['type'] == 'gdacs_cap_direct':
+                alerts = parse_cap_all_areas(data)
+                print(f"  Found {len(alerts)} alert(s)")
+
             elif feed['type'] == 'nasa_eonet':
                 alerts = parse_nasa_eonet(data)
                 print(f"  Found {len(alerts)} event(s)")
+
+            elif feed['type'] == 'nws_geojson':
+                alerts = parse_nws_geojson(data)
+                print(f"  Found {len(alerts)} alert(s)")
 
             elif feed['type'] == 'cap_xml':
                 alerts = parse_cap_all_areas(data)
@@ -362,8 +451,6 @@ async def poll_all_feeds():
                 n = await upsert_alerts(conn, alerts)
                 total += n
                 print(f"  ✅ {feed['name']} delivered {len(alerts)} alert(s) — {n} new")
-                # Got data — continue to next feed for more coverage
-                # (don't break — collect from all available sources)
             else:
                 print(f"  ⚠️  No alerts parsed from {feed['name']}")
 
