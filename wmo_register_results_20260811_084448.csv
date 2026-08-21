@@ -1,0 +1,9 @@
+country_or_authority,register_page,candidate_link_text,candidate_link_url,verified_working,note
+RSS,https://alertingauthority.wmo.int/rss.xml,,,False,no feed-like links found
+ATOM,https://alertingauthority.wmo.int/atom.xml,,,False,no feed-like links found
+here,https://alertingauthority.wmo.int/edit.php,RSS,https://alertingauthority.wmo.int/rss.xml,True,confirmed feed
+here,https://alertingauthority.wmo.int/edit.php,ATOM,https://alertingauthority.wmo.int/atom.xml,True,confirmed feed
+,https://alertingauthority.wmo.int/#top,RSS,https://alertingauthority.wmo.int/rss.xml,True,confirmed feed
+,https://alertingauthority.wmo.int/#top,ATOM,https://alertingauthority.wmo.int/atom.xml,True,confirmed feed
+Back to top,https://alertingauthority.wmo.int/,RSS,https://alertingauthority.wmo.int/rss.xml,True,confirmed feed
+Back to top,https://alertingauthority.wmo.int/,ATOM,https://alertingauthority.wmo.int/atom.xml,True,confirmed feed
