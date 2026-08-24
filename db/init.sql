@@ -47,9 +47,11 @@ CREATE TABLE IF NOT EXISTS alerts (
     expires TIMESTAMP WITH TIME ZONE,
     polygon geometry(Polygon, 4326), -- PostGIS geometry (allows NULL for feeds without polygons)
     plain_text TEXT,
+    plain_text_language VARCHAR(10) DEFAULT 'en',
     accuracy_percent INTEGER,
     original_language VARCHAR(10) DEFAULT 'en',
     is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     last_seen_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
@@ -58,6 +60,16 @@ CREATE INDEX IF NOT EXISTS idx_alerts_polygon ON alerts USING GIST (polygon);
 
 -- Index for quickly filtering active, non-expired alerts
 CREATE INDEX IF NOT EXISTS idx_alerts_active ON alerts (is_active, expires);
+
+-- ============================================================
+--  TABLE: country_polygons
+--  Fallback country boundaries for alerts without geometry.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS country_polygons (
+    iso_code VARCHAR(3) PRIMARY KEY,
+    country_name VARCHAR(100) NOT NULL,
+    polygon_wkt TEXT NOT NULL
+);
 
 
 -- ============================================================

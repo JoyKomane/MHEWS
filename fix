@@ -1,0 +1,5 @@
+﻿POSTGRES_DB=mhews
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=postgres
+DATABASE_URL=postgres://postgres:postgres@db:5432/mhews
+PORT=8000

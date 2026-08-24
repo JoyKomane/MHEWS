@@ -4,7 +4,7 @@
 # ============================================================
 
 from fastapi import APIRouter, Query, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 import json
 
@@ -90,8 +90,8 @@ async def get_alerts(country: Optional[str] = Query(None)):
 # ============================================================
 
 class LocationCheck(BaseModel):
-    lat: float
-    lon: float
+    lat: float = Field(ge=-90, le=90)
+    lon: float = Field(ge=-180, le=180)
 
 @router.post("/check", summary="Check if location is in hazard zone")
 async def check_location(location: LocationCheck):
